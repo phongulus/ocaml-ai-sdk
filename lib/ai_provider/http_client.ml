@@ -1,10 +1,25 @@
 let post ~(timeouts : Http_timeouts.t) ~provider ~headers ~body uri =
   let started = Unix.gettimeofday () in
   try%lwt Lwt_unix.with_timeout timeouts.request_timeout (fun () -> Cohttp_lwt_unix.Client.post ~headers ~body uri)
-  with Lwt_unix.Timeout ->
+  with
+  | Lwt_unix.Timeout ->
     let elapsed = Unix.gettimeofday () -. started in
     let err =
       Provider_error.make_timeout ~provider ~phase:Request_headers ~elapsed_s:elapsed ~limit_s:timeouts.request_timeout
+    in
+    Lwt.fail (Provider_error.Provider_error err)
+  | Cohttp_lwt.Connection.Retry ->
+    (* The server (or an intermediary) closed the connection before a
+       response: cohttp raises Retry to signal the request may be reissued.
+       Map it to a retryable error so Retry.with_retries resends it. *)
+    let elapsed = Unix.gettimeofday () -. started in
+    let err =
+      {
+        Provider_error.provider;
+        kind = Network_error { message = Printf.sprintf "connection closed before response (after %.0fs)" elapsed };
+        is_retryable = true;
+        retry_after_s = None;
+      }
     in
     Lwt.fail (Provider_error.Provider_error err)
 
